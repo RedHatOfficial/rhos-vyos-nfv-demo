@@ -1,0 +1,307 @@
+---
+- hosts: localhost
+  gather_facts: False
+  vars_files:
+    - variables.yaml
+  vars:
+    vyos_hostname: vyos-1.1.7
+    vyos_domainname: redhat.local
+    vyos_flavor: { name: 'demo-vyos-small', ram: '2048', disk: '2', vcpu: '2'}
+    vyos_image: { name: 'VyOS-1.1.7-cloudinit', file: '../images/vyos-1.1.7-cloudinit.qcow2.tgz' }
+    vm_hostname: vm-test-vyos
+    vm_image: { name: 'Cirros', file: '../images/cirros-0.3.5-x86_64-disk.img.tgz' }
+    vm_flavor: { name: 'demo-vm-small', ram: '2048', disk: '2', vcpu: '1'}
+    ssh_key: { name: 'stack-key', file: '/home/stack/.ssh/id_rsa.pub' }
+  connection: local
+  tasks:
+  - name: Create a working directory
+    tempfile:
+      state: directory
+      prefix: "vyos-demo-"
+    register: working_dir
+  - name: Create a run directory to store the user_data file in when complete
+    file:
+      path: "../run"
+      state: directory
+  - name: Create keypair {{ ssh_key.name }} (if needed)
+    shell: |
+      source {{ cloud_rc_file }}
+      if [[ -z "$(openstack keypair list -c Name -f value | egrep '^{{ ssh_key.name }}$')" ]]
+      then
+        openstack keypair create --public-key {{ ssh_key.file }} {{ ssh_key.name }}
+        echo "KEYPAIR CREATED"
+      fi 
+    register: command_output
+    changed_when: "'KEYPAIR CREATED' in command_output.stdout"
+  - name: Create flavor {{ vyos_flavor.name }} (if needed)
+    shell: |
+      source {{ cloud_rc_file }}
+      if [[ -z "$(openstack flavor list -c Name -f value | egrep '^{{ vyos_flavor.name }}$')" ]]
+      then
+        openstack flavor create --ram {{ vyos_flavor.ram }} --vcpus {{ vyos_flavor.vcpu }} --disk {{ vyos_flavor.disk }} --public {{ vyos_flavor.name }}
+        echo "FLAVOR CREATED"
+      fi 
+    register: command_output
+    changed_when: "'FLAVOR CREATED' in command_output.stdout"
+  - name: Create flavor {{ vm_flavor.name }} (if needed)
+    shell: |
+      source {{ cloud_rc_file }}
+      if [[ -z "$(openstack flavor list -c Name -f value | egrep '^{{ vm_flavor.name }}$')" ]]
+      then
+        openstack flavor create --ram {{ vm_flavor.ram }} --vcpus {{ vm_flavor.vcpu }} --disk {{ vm_flavor.disk }} --public {{ vm_flavor.name }}
+        echo "FLAVOR CREATED"
+      fi 
+    register: command_output
+    changed_when: "'FLAVOR CREATED' in command_output.stdout"
+  - name: Ensure Openstack networks exist (fail if they don't)
+    shell: |
+      source {{ cloud_rc_file }}
+      openstack network list -c Name -f value | egrep '(^{{ item.os_network }}$)' | wc -l
+    with_items: "{{ ports }}"
+    register: network_count
+    failed_when: "network_count.stdout != '1'"
+    changed_when: False
+  - name: Ensure ACTIVE Neutron ports do not exist for requested IP addresses on requested networks
+    shell: |
+      source {{ cloud_rc_file }}
+      SUBNET_ID=$(openstack network list -f value -c Name -c Subnets | egrep '(^{{ item.os_network }} )' | awk '{print $NF}')
+      openstack port list -f value -c "Fixed IP Addresses" -c Status | egrep "^ip_address='{{ item.address }}'" | egrep $SUBNET_ID | egrep -v ' DOWN$' | wc -l
+    with_items: "{{ ports }}"
+    register: port_count
+    failed_when: "port_count.stdout != '0'"
+    changed_when: False
+    when: vyos_create_instance 
+  - name: Create Neutron ports for the requested IP addresses (if needed)
+    shell: |
+      source {{ cloud_rc_file }}
+      SUBNET_ID=$(openstack network list -f value -c Name -c Subnets | egrep '(^{{ item.os_network }} )' | awk '{print $NF}')
+      SUBNET_ID=$(openstack port list -f value -c 'Fixed IP Addresses' | egrep "^ip_address='{{ item.address }}'" | egrep $SUBNET_ID)
+      if [[ -z "$SUBNET_ID" ]]
+      then
+        openstack port create --fixed-ip ip-address={{ item.address }} --enable --disable-port-security --network {{ item.os_network }} VyOS-{{ item.nic }}
+      fi
+    register: command_output
+    changed_when: "'PORT CREATED' in command_output.stdout"
+    with_items: "{{ ports }}"
+    when: vyos_create_instance 
+  - name: Check if VyOS image exists in Glance
+    shell: |
+      source {{ cloud_rc_file }}
+      openstack image list -c Name -f value | egrep '(^{{ vyos_image.name }}$)' | wc -l
+    register: image_count
+  - name: Extract the VyOS cloud-init image
+    unarchive:
+      src: "{{ vyos_image.file }}"
+      dest: "{{ working_dir.path }}"
+    when: "'0' in image_count.stdout"
+  - name: Get the VyOS qcow2 file name
+    find:
+      paths: "{{ working_dir.path }}"
+      patterns: "^.*\\.(qcow2|img)$"
+      use_regex: True
+    register: directory_contents
+    when: "'0' in image_count.stdout"
+  - name: Upload the VyOS appliance image
+    shell: |
+      source {{ cloud_rc_file }}
+      openstack image create --public --container-format bare --disk-format qcow2 --file {{ directory_contents.files[0].path }} {{ vyos_image.name }}
+    when: "'0' in image_count.stdout"
+  - name: Cleanup VyOS appliance image
+    file:
+      state: absent
+      path: "{{ directory_contents.files[0].path }}"
+    when: "'0' in image_count.stdout"
+  - name: Check if VM image exists in Glance
+    shell: |
+      source {{ cloud_rc_file }}
+      openstack image list -c Name -f value | egrep '(^{{ vm_image.name }}$)' | wc -l
+    register: image_count
+  - name: Extract the VM cloud-init image
+    unarchive:
+      src: "{{ vm_image.file }}"
+      dest: "{{ working_dir.path }}"
+    when: "'0' in image_count.stdout"
+  - name: Get the VM qcow2 file name
+    find:
+      paths: "{{ working_dir.path }}"
+      patterns: "^.*\\.(qcow2|img)$"
+      use_regex: True
+    register: directory_contents
+    when: "'0' in image_count.stdout"
+  - name: Upload the VM image
+    shell: |
+      source {{ cloud_rc_file }}
+      openstack image create --public --container-format bare --disk-format qcow2 --file {{ directory_contents.files[0].path }} {{ vm_image.name }}
+    when: "'0' in image_count.stdout"
+  - name: Cleanup VM image
+    file:
+      state: absent
+      path: "{{ directory_contents.files[0].path }}"
+    when: "'0' in image_count.stdout"
+  - name: Create initial user_data file to pass to cloud-init
+    copy:
+      dest: "{{ working_dir.path }}/user_data"
+      content: |
+        #!/bin/vbash
+        source /opt/vyatta/etc/functions/script-template
+
+  - name: Add NIC configuration to user_data
+    blockinfile:
+      path: "{{ working_dir.path }}/user_data"
+      marker: "# {mark} ANSIBLE MANAGED BLOCK - Interface Config {{ item.nic }}"
+      block: |
+        set interfaces ethernet {{ item.nic }} address {{ item.address }}/{{ item.prefix }}
+        set interfaces ethernet {{ item.nic }} description VyOS-{{ item.nic }}
+
+    with_items: "{{ ports }}"
+  - name: Add static routes to user_data
+    blockinfile:
+      path: "{{ working_dir.path }}/user_data"
+      marker: "# {mark} ANSIBLE MANAGED BLOCK - Static Route Config {{ item.route }}"
+      block: |
+        set protocols static route {{ item.route }}
+        set protocols static route {{ item.route }} next-hop {{ item.next_hop }}
+
+    with_items: "{{ routes }}"
+  - name: Add source NAT rules to user_data
+    blockinfile:
+      path: "{{ working_dir.path }}/user_data"
+      marker: "# {mark} ANSIBLE MANAGED BLOCK - Source NAT Config - Rule {{ item.index }}"
+      block: |
+        set nat source rule {{ item.index }}
+        set nat source rule {{ item.index }} outbound-interface {{ item.outbound_interface }}
+        set nat source rule {{ item.index }} source address {{ item.source_address }}
+        set nat source rule {{ item.index }} translation address {{ item.translation_address }}
+
+    with_items: "{{ nat_rules }}"
+    when: "item.type == 'source'"
+  - name: Add destination NAT rules to user_data
+    blockinfile:
+      path: "{{ working_dir.path }}/user_data"
+      marker: "# {mark} ANSIBLE MANAGED BLOCK - Destination NAT Config - Rule {{ item.index }}"
+      block: |
+        set nat destination rule {{ item.index }}
+        set nat destination rule {{ item.index }} destination address {{ item.source_address }}
+        set nat destination rule {{ item.index }} destination port {{ item.source_port }}
+        set nat destination rule {{ item.index }} inbound-interface {{ item.source_interface }}
+        set nat destination rule {{ item.index }} protocol {{ item.protocol }}
+        set nat destination rule {{ item.index }} translation address {{ item.destination_address }}
+        set nat destination rule {{ item.index }} translation port {{ item.destination_port }}
+    with_items: "{{ nat_rules }}"
+    when: "item.type == 'destination'"
+  - name: Add DNS forwarding to user_data
+    blockinfile:
+      path: "{{ working_dir.path }}/user_data"
+      marker: "# {mark} ANSIBLE MANAGED BLOCK - DNS Forward Config - Port {{ item.listen_port }}"
+      block: |
+        set service dns forwarding name-server {{ item.name_server }}
+        set service dns forwarding listen-on {{ item.listen_port }}
+    with_items: "{{ services }}"
+    when: item.name == 'dns_forwarding'
+  - name: Add host name to user_data
+    lineinfile:
+      path: "{{ working_dir.path }}/user_data"
+      regexp: "^set system host-name.*$"
+      line: "set system host-name {{ vyos_hostname }}"
+  - name: Add domain name to user_data
+    lineinfile:
+      path: "{{ working_dir.path }}/user_data"
+      regexp: "^set system domain-name.*$"
+      line: "set system domain-name {{ vyos_domainname }}"
+  - name: Add NTP servers to user_data
+    lineinfile:
+      path: "{{ working_dir.path }}/user_data"
+      regexp: "^set system ntp server {{ item }}$"
+      line: "set system ntp server {{ item }}"
+    with_items: "{{ ntp_servers }}"
+  - name: Add DNS servers to user_data
+    lineinfile:
+      path: "{{ working_dir.path }}/user_data"
+      regexp: "^set system name-server {{ item }}$"
+      line: "set system name-server {{ item }}"
+    with_items: "{{ name_servers }}"
+  - name: Add SSH Config to user_data
+    blockinfile:
+      path: "{{ working_dir.path }}/user_data"
+      marker: "# {mark} ANSIBLE MANAGED BLOCK - SSH Config"
+      block: |
+        set service ssh listen-address {{ item.listen_address }}
+        set service ssh port {{ item.listen_port }}
+    with_items: "{{ services }}"
+    when: item.name == 'ssh'
+  - name: Add users to user_data
+    lineinfile:
+      path: "{{ working_dir.path }}/user_data"
+      regexp: "^set system login user {{ item.name }} authentication plaintext-password {{ item.password }}$"
+      line: "set system login user {{ item.name }} authentication plaintext-password {{ item.password }}"
+    with_items: "{{ users }}"
+  - name: Add commit to user_data
+    lineinfile:
+      path: "{{ working_dir.path }}/user_data"
+      regexp: "^commit$"
+      line: "commit"
+  - name: Add save to user_data
+    lineinfile:
+      path: "{{ working_dir.path }}/user_data"
+      regexp: "^save$"
+      line: "save"
+  - name: Copy user_data from working directory to ../run
+    copy:
+      src: "{{ working_dir.path }}/user_data"
+      dest: "../run/user_data"
+  - name: Delete working directory
+    file:
+      path: "{{ working_dir.path }}"
+      state: absent
+  - name: Create VyOS Appliance Instance
+    shell: |
+      source {{ cloud_rc_file }}
+      openstack server create --key-name {{ ssh_key.name }} --flavor {{ vyos_flavor.name }} --image {{ vyos_image.name }} --nic port-id=VyOS-eth0 --nic port-id=VyOS-eth1   --config-drive True --user-data ../run/user_data {{ vyos_hostname }}
+    when: vyos_create_instance
+  - name: Create VM Instance
+    shell: |
+      source {{ cloud_rc_file }}
+      openstack server create --key-name {{ ssh_key.name }} --flavor {{ vm_flavor.name }} --image {{ vm_image.name }} --nic net-id={{ ports[1].os_network }} {{ vm_hostname }}
+    when: vm_create_instance
+  - name: Create an inventory file to be used for vyos_config for additional demo purposes
+    copy:
+      content: |
+        [vyos-routers]
+        VyOS-openstack ansible_host={{ ports[0].address }} ansible_port={{ item.listen_port }} ansible_user={{ users[0].name }} ansible_private_key_file={{ ssh_key.file }}
+      dest: ../run/vyos-inventory
+    with_items: "{{ services }}"
+    when: item.name == 'ssh'and vm_create_instance and vyos_create_instance
+  - name: Obtain IP address of Cirros VM
+    shell: |
+      source {{ cloud_rc_file }}
+      IP_ADDRESS=$(openstack server list -c Name -c Networks -f value | egrep "^{{ vm_hostname }} " | awk -F= '{print $2}')
+      echo "${IP_ADDRESS}"
+    register: instance_ip
+    when: vm_create_instance and vyos_create_instance
+  - name: Create a port-forwarding playbook for demo purposes
+    copy:
+      dest: ../run/demo_port_forwarding.yaml
+      content: |
+        ---
+        - hosts: vyos-routers
+          vars:
+            source_address: {{ ports[0].address }}
+            source_port: 22
+            source_interface: {{ ports[0].nic }}
+            destination_address: {{ instance_ip.stdout }}
+            destination_port: 22
+            protocol: tcp
+          connection: local
+          tasks:
+          - name: configure the remote device
+            vyos_config:
+              lines: {% raw %}
+                - set nat destination rule 1 
+                - set nat destination rule 1 destination address {{ source_address }}
+                - set nat destination rule 1 destination port {{ source_port }}
+                - set nat destination rule 1 inbound-interface {{ source_interface }}
+                - set nat destination rule 1 protocol {{ protocol }}
+                - set nat destination rule 1 translation address {{ destination_address }}
+                - set nat destination rule 1 translation port {{ destination_port }}
+                {% endraw %}
+    when: vm_create_instance and vyos_create_instance
