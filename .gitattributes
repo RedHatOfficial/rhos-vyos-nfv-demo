@@ -1,2 +1,2 @@
-*.tgz filter=lfs diff=lfs merge=lfs -text
-images/** filter=lfs diff=lfs merge=lfs -text
+images/vyos-1.1.7-cloudinit.qcow2.tgz filter=lfs diff=lfs merge=lfs -text
+images/cirros-0.3.5-x86_64-disk.img.tgz filter=lfs diff=lfs merge=lfs -text
