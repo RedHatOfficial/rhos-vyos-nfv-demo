@@ -4,6 +4,15 @@
 cloud_rc_file: /home/stack/overcloudrc
 #
 # ports: These are the ports that will be created on your VyOS appliance.
+#        NOTE:  In the default configuration:
+#
+#               eth0 - should be your Provider Network and have any IP address
+#               you choose on that network.
+#
+#               eth1 - should connect to your private tenant network.  The 
+#               IP address you give to eth1 should be the configured 
+#               DEFAULT GATEWAY of that private tenant network.
+#
 #   nic:        Name of the interface on the VyOS appliance
 #   os_network: Name of the network in Openstack that will be connected to that NIC
 #               ** NETWORK MUST ALREADY EXISTS **
@@ -15,7 +24,10 @@ ports:
   - { nic: 'eth0', os_network: 'vlan118', address: '10.9.64.250', prefix: '26' }
   - { nic: 'eth1', os_network: 'private', address: '192.168.0.1', prefix: '24' }
 #
-# routes: Static routes to be added to the VyOS appliance
+# routes: Static routes to be added to the VyOS appliance. 
+#         NOTE: In the default configuration, the next_hop is the IP address of 
+#               the DEFAULT GATEWAY of your Provider Network.
+#
 #
 routes:
   - { route: '0.0.0.0/0', next_hop: '10.9.64.193' }
@@ -35,18 +47,24 @@ name_servers:
   - 10.5.30.160
 #
 # nat_rules: Name Address Translation rules to be configured on the VyOS appliance
-#            Currently only supports source NAT for masquerating and destination NAT for port forwarding
+#            NOTE: Currently this playbook only supports:
+#                  source NAT - masquerading 
+#                  destination NAT - port forwarding
 #
 nat_rules:
   - { index: '1', type: 'source', outbound_interface: 'eth0', source_address: '192.168.0.1/24', translation_address: 'masquerade' }
 #
 # services: These are the services to configure on the VyOS appliance and their associated settings
+#           NOTE: Currently this playbook only supports configuring the following VyOS Services:
+#                 dns_forwarding
+#                 ssh
 #
 services:
   - { name: 'dns_forwarding', name_server: '10.11.5.19', listen_port: 'eth1' }
   - { name: 'ssh', listen_address: '0.0.0.0', listen_port: '2222' }
 #
 # users: The user to configure on the VyOS appliance
+#        NOTE: This is the user which cloud-init will inject the ssh-key to
 #
 users:
   - { name: 'vyos', password: 'Redhat01' }
@@ -56,6 +74,6 @@ users:
 #
 vyos_create_instance: True
 #
-# vm_create_instance: Setting this to True will launch an instance of the Cirros on the private network on Openstack
+# vm_create_instance: Setting this to True will launch an instance of the Cirros on the private tenant network on Openstack
 #
 vm_create_instance: True

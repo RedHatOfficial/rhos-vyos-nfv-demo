@@ -274,7 +274,22 @@
   - name: Obtain IP address of Cirros VM
     shell: |
       source {{ cloud_rc_file }}
-      IP_ADDRESS=$(openstack server list -c Name -c Networks -f value | egrep "^{{ vm_hostname }} " | awk -F= '{print $2}')
+      SLEEP_TIMER=30
+      SLEEP_INTERVAL=5
+      IP_ADDRESS=""
+      while [[ -z "${IP_ADDRESS}" ]]
+      do
+        IP_ADDRESS=$(openstack server list -c Name -c Networks -f value | egrep "^{{ vm_hostname }} " | awk -F= '{print $2}')
+        if [[ -z "${IP_ADDRESS}" ]]
+        then
+          sleep ${SLEEP_INTERVAL}
+          SLEEP_TIMER=$(( ${SLEEP_TIMER} - ${SLEEP_INTERVAL} ))
+        fi
+        if [[ ${SLEEP_TIMER} -le 0 ]]
+        then
+          exit 1
+        fi
+      done
       echo "${IP_ADDRESS}"
     register: instance_ip
     when: vm_create_instance and vyos_create_instance
@@ -304,4 +319,4 @@
                 - set nat destination rule 1 translation address {{ destination_address }}
                 - set nat destination rule 1 translation port {{ destination_port }}
                 {% endraw %}
-    when: vm_create_instance and vyos_create_instance
+    when: vm_create_instance and vyos_create_instance and instance_ip.stdout != ""
